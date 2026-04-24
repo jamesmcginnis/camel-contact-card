@@ -32,6 +32,7 @@ class CamelContactCard extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this._popupOverlay   = null;
     this._sensorPopup    = null;
+    this._graphHours     = 24;
   }
 
   static getConfigElement() {
@@ -660,7 +661,7 @@ class CamelContactCard extends HTMLElement {
     lastRow.appendChild(lastLbl); lastRow.appendChild(lastRight);
     lastRow.addEventListener('click', ev => {
       ev.stopPropagation();
-      this._openHistoryPopup(entityId, name, accent, popupBg, textCol);
+      this._openGraphPopup(entityId);
     });
     listCard.appendChild(lastRow);
 
@@ -683,97 +684,389 @@ class CamelContactCard extends HTMLElement {
     this._sensorPopup = sensorOverlay;
   }
 
-  // ── History Popup ─────────────────────────────────────────────────────────
+  // ── Graph Popup ───────────────────────────────────────────────────────────
 
-  async _openHistoryPopup(entityId, name, accent, popupBg, textCol) {
-    const existing = document.getElementById('camel-history-sheet');
+  async _openGraphPopup(entityId) {
+    const existing = document.getElementById('camel-graph-sheet');
     if (existing) existing.remove();
 
-    const sheet = document.createElement('div');
-    sheet.id = 'camel-history-sheet';
-    sheet.style.cssText = `position:fixed;inset:0;z-index:11000;display:flex;align-items:flex-end;justify-content:center;padding:16px;background:rgba(0,0,0,0.5);backdrop-filter:blur(8px);`;
+    const cfg       = this._config;
+    const popupBg   = cfg.popup_bg      || '#1c1c1e';
+    const accent    = cfg.accent_color  || '#30D158';
+    const textCol   = cfg.text_color    || '#ffffff';
+    const openCol   = cfg.open_color    || '#FF453A';
+    const closedCol = cfg.closed_color  || '#48484A';
+    const name      = this._name(entityId);
+    const isOpen    = this._isOpen(entityId);
+    const stateObj  = this._hass?.states[entityId];
+    const attrs     = stateObj?.attributes || {};
 
-    const inner = document.createElement('div');
-    inner.style.cssText = `background:${popupBg};border:1px solid rgba(255,255,255,0.13);border-radius:22px;padding:18px;width:100%;max-width:380px;max-height:70vh;overflow-y:auto;font-family:${this._haFont()};color:${textCol};`;
+    this._graphHours = 24;
 
-    const titleRow = document.createElement('div');
-    titleRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;';
-    titleRow.innerHTML = `
-      <div style="font-size:13px;font-weight:700;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:0.06em;">Recent History</div>
-      <button style="background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:26px;height:26px;cursor:pointer;color:rgba(255,255,255,0.65);font-size:14px;display:flex;align-items:center;justify-content:center;padding:0;font-family:inherit;">✕</button>`;
-    titleRow.querySelector('button').addEventListener('click', () => sheet.remove());
-    inner.appendChild(titleRow);
+    const graphOverlay = document.createElement('div');
+    graphOverlay.id = 'camel-graph-sheet';
+    graphOverlay.style.cssText = `position:fixed;inset:0;z-index:11000;display:flex;align-items:center;justify-content:center;padding:16px;background:rgba(0,0,0,0.45);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);`;
 
-    const loadingEl = document.createElement('div');
-    loadingEl.style.cssText = 'text-align:center;padding:20px;color:rgba(255,255,255,0.25);font-size:13px;';
-    loadingEl.textContent = 'Loading…';
-    inner.appendChild(loadingEl);
+    const closeGraph = () => {
+      graphOverlay.style.transition = 'opacity 0.15s ease';
+      graphOverlay.style.opacity    = '0';
+      setTimeout(() => { if (graphOverlay.parentNode) graphOverlay.parentNode.removeChild(graphOverlay); }, 150);
+    };
 
-    sheet.appendChild(inner);
-    sheet.addEventListener('click', e => { if (e.target === sheet) sheet.remove(); });
-    document.body.appendChild(sheet);
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes camelGraphUp { from{transform:translateY(20px) scale(0.97);opacity:0} to{transform:none;opacity:1} }
+      .camel-graph-popup { animation: camelGraphUp 0.26s cubic-bezier(0.34,1.28,0.64,1); }
+      .camel-graph-close-btn:hover { background:rgba(255,255,255,0.22)!important; }
+      .camel-info-row { display:flex;align-items:center;justify-content:space-between;padding:9px 0;border-bottom:1px solid rgba(255,255,255,0.07); }
+      .camel-info-row:last-child { border-bottom:none; }
+      .camel-info-label { font-size:12px;color:rgba(255,255,255,0.45);font-weight:500; }
+      .camel-info-value { font-size:13px;font-weight:600;color:rgba(255,255,255,0.9);text-align:right; }
+      .camel-seg-btn { flex:1;text-align:center;padding:7px 4px;font-size:12px;font-weight:600;border-radius:7px;cursor:pointer;color:rgba(255,255,255,0.55);border:none;background:none;transition:all 0.2s;font-family:inherit;touch-action:manipulation; }
+      .camel-seg-btn.active { background:${accent};color:#fff;box-shadow:0 1px 4px rgba(0,0,0,0.35); }
+    `;
 
+    const popup = document.createElement('div');
+    popup.className = 'camel-graph-popup';
+    popup.style.cssText = `background:${popupBg};backdrop-filter:blur(40px) saturate(180%);-webkit-backdrop-filter:blur(40px) saturate(180%);border:1px solid rgba(255,255,255,0.13);border-radius:26px;box-shadow:0 28px 72px rgba(0,0,0,0.65);padding:20px;width:100%;max-width:400px;max-height:85vh;overflow-y:auto;color:${textCol};font-family:${this._haFont()};`;
+    popup.addEventListener('touchmove', e => e.stopPropagation(), { passive: true });
+
+    // ── Header ────────────────────────────────────────────────────────────
+    const headerRow = document.createElement('div');
+    headerRow.style.cssText = 'display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;';
+    headerRow.innerHTML = `
+      <span style="font-size:13px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:rgba(255,255,255,0.4);">${name}</span>
+      <button class="camel-graph-close-btn" style="background:rgba(255,255,255,0.1);border:none;border-radius:50%;width:30px;height:30px;cursor:pointer;display:flex;align-items:center;justify-content:center;color:rgba(255,255,255,0.65);font-size:16px;line-height:1;padding:0;transition:background 0.15s;flex-shrink:0;">✕</button>`;
+    headerRow.querySelector('.camel-graph-close-btn').addEventListener('click', closeGraph);
+
+    // ── Current state display ─────────────────────────────────────────────
+    const stateColor = isOpen ? openCol : 'rgba(255,255,255,0.3)';
+    const readingRow = document.createElement('div');
+    readingRow.style.cssText = 'display:flex;align-items:baseline;gap:8px;margin-bottom:14px;';
+    readingRow.innerHTML = `
+      <span style="font-size:48px;font-weight:700;letter-spacing:-1.5px;color:${stateColor};line-height:1;">${isOpen ? 'Open' : 'Closed'}</span>`;
+
+    // ── Time-range segmented control ──────────────────────────────────────
+    const segWrap = document.createElement('div');
+    segWrap.style.cssText = 'display:flex;background:rgba(118,118,128,0.2);border-radius:10px;padding:3px;gap:2px;margin-bottom:12px;';
+
+    const graphWrap = document.createElement('div');
+    graphWrap.style.cssText = 'height:150px;margin-bottom:16px;position:relative;border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.03);padding:4px;';
+    graphWrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Loading…</div>`;
+
+    [1, 3, 6, 12, 24].forEach(h => {
+      const btn = document.createElement('button');
+      btn.className = 'camel-seg-btn' + (h === this._graphHours ? ' active' : '');
+      btn.textContent = `${h}h`;
+      btn.dataset.hours = h;
+      const switchHours = e => {
+        if (e.type === 'touchend') e.preventDefault();
+        this._graphHours = h;
+        segWrap.querySelectorAll('.camel-seg-btn').forEach(b => b.classList.toggle('active', parseInt(b.dataset.hours) === h));
+        graphWrap.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Loading…</div>`;
+        this._loadContactGraph(entityId, graphWrap, openCol, closedCol, h);
+      };
+      btn.addEventListener('click', switchHours);
+      btn.addEventListener('touchend', switchHours);
+      segWrap.appendChild(btn);
+    });
+
+    // ── Info rows ─────────────────────────────────────────────────────────
+    const infoWrap = document.createElement('div');
+    const lastChanged = stateObj?.last_changed || stateObj?.last_updated;
+    let timeAgo = '—';
+    if (lastChanged) {
+      const mins = Math.floor((Date.now() - new Date(lastChanged).getTime()) / 60000);
+      timeAgo = mins < 1 ? 'Just now' : mins < 60 ? `${mins} min ago` : `${Math.floor(mins / 60)}h ago`;
+    }
+    const dc = this._deviceClass(entityId);
+    const infoRows = [{ label: 'Last changed', value: timeAgo }];
+    if (dc) infoRows.push({ label: 'Type', value: dc.charAt(0).toUpperCase() + dc.slice(1) });
+    if (attrs.battery_level !== undefined) infoRows.push({ label: 'Battery', value: `${attrs.battery_level}%` });
+
+    infoRows.forEach(({ label, value }) => {
+      const row = document.createElement('div');
+      row.className = 'camel-info-row';
+      row.innerHTML = `<span class="camel-info-label">${label}</span><span class="camel-info-value">${value}</span>`;
+      infoWrap.appendChild(row);
+    });
+
+    popup.appendChild(style);
+    popup.appendChild(headerRow);
+    popup.appendChild(readingRow);
+    popup.appendChild(segWrap);
+    popup.appendChild(graphWrap);
+    popup.appendChild(infoWrap);
+
+    graphOverlay.appendChild(popup);
+    graphOverlay.addEventListener('click', e => { if (e.target === graphOverlay) closeGraph(); });
+    document.body.appendChild(graphOverlay);
+
+    this._loadContactGraph(entityId, graphWrap, openCol, closedCol, this._graphHours);
+  }
+
+  // ── Load contact history and render graph ─────────────────────────────────
+
+  async _loadContactGraph(entityId, container, openCol, closedCol, hours) {
     try {
       const end   = new Date();
-      const start = new Date(end - 24 * 3600000);
+      const start = new Date(end - hours * 3600000);
       const resp  = await this._hass.callApi('GET',
         `history/period/${start.toISOString()}?filter_entity_id=${entityId}&end_time=${end.toISOString()}&minimal_response=true&no_attributes=true`
       );
-      const raw = (resp?.[0] || []).filter(s => s.state === 'on' || s.state === 'off');
+      const raw   = resp?.[0] || [];
+      const valid = raw.filter(s => s.state === 'on' || s.state === 'off');
 
-      loadingEl.remove();
-
-      if (!raw.length) {
-        const emptyEl = document.createElement('div');
-        emptyEl.style.cssText = 'text-align:center;padding:20px;color:rgba(255,255,255,0.25);font-size:13px;';
-        emptyEl.textContent = 'No history in the last 24 hours';
-        inner.appendChild(emptyEl);
+      if (!valid.length) {
+        container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">No history in this period</div>`;
         return;
       }
 
-      const items = [...raw].reverse();
-      items.forEach((entry, idx) => {
-        const isOpen  = entry.state === 'on';
-        const ts      = new Date(entry.last_changed || entry.last_updated);
-        const timeStr = `${ts.getHours().toString().padStart(2,'0')}:${ts.getMinutes().toString().padStart(2,'0')}`;
-        const dateStr = ts.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+      const states      = valid.map(s => s.state);
+      const timestamps  = valid.map(s => s.last_changed || s.last_updated);
+      const windowStart = start.getTime();
+      const windowEnd   = end.getTime();
 
-        let durationStr = '';
-        if (idx < items.length - 1) {
-          const nextTs  = new Date(items[idx + 1].last_changed || items[idx + 1].last_updated);
-          const diffMin = Math.round((ts - nextTs) / 60000);
-          durationStr   = diffMin < 60
-            ? `${diffMin}m`
-            : `${Math.floor(diffMin / 60)}h ${diffMin % 60}m`;
-        }
-
-        const row = document.createElement('div');
-        row.style.cssText = `display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(255,255,255,0.06);${idx === 0 ? 'border-top:1px solid rgba(255,255,255,0.06);' : ''}`;
-
-        const dot = document.createElement('div');
-        dot.style.cssText = `width:10px;height:10px;border-radius:50%;flex-shrink:0;background:${isOpen ? accent : 'rgba(255,255,255,0.2)'};`;
-
-        const info = document.createElement('div');
-        info.style.cssText = 'flex:1;min-width:0;';
-        info.innerHTML = `
-          <div style="font-size:13px;font-weight:600;color:${isOpen ? accent : 'rgba(255,255,255,0.45)'};">${isOpen ? 'Opened' : 'Closed'}</div>
-          <div style="font-size:11px;color:rgba(255,255,255,0.3);margin-top:2px;">${dateStr} · ${timeStr}</div>`;
-
-        row.appendChild(dot);
-        row.appendChild(info);
-
-        if (durationStr) {
-          const dur = document.createElement('div');
-          dur.style.cssText = 'font-size:11px;color:rgba(255,255,255,0.3);flex-shrink:0;';
-          dur.textContent = durationStr;
-          row.appendChild(dur);
-        }
-
-        inner.appendChild(row);
-      });
-    } catch(e) {
-      loadingEl.textContent = 'Could not load history';
+      container.innerHTML = this._buildContactGraph(states, timestamps, windowStart, windowEnd, openCol, closedCol);
+      const svg = container.querySelector('svg');
+      if (svg) this._attachContactCrosshair(svg, states, timestamps, windowStart, windowEnd, openCol, closedCol);
+    } catch (e) {
+      container.innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:rgba(255,255,255,0.25);font-size:12px;">Could not load history</div>`;
     }
+  }
+
+  // ── Build binary step-chart SVG ───────────────────────────────────────────
+
+  _buildContactGraph(states, timestamps, windowStart, windowEnd, openCol, closedCol) {
+    const W = 380, H = 140;
+    const pad   = { top: 30, right: 10, bottom: 26, left: 44 };
+    const plotW = W - pad.left - pad.right;
+    const plotH = H - pad.top  - pad.bottom;
+    const yOpen   = pad.top;
+    const yClosed = pad.top + plotH;
+
+    const span = windowEnd - windowStart || 1;
+    const toX  = t => pad.left + ((t - windowStart) / span) * plotW;
+    const endX = W - pad.right;
+
+    // (x, y) points using wall-clock time on x-axis
+    const points = timestamps.map((ts, i) => ({
+      x:     Math.max(pad.left, Math.min(endX, toX(new Date(ts).getTime()))),
+      y:     states[i] === 'on' ? yOpen : yClosed,
+      state: states[i],
+    }));
+
+    // Step path: H→V steps
+    let stepD = `M${points[0].x.toFixed(1)},${points[0].y.toFixed(1)}`;
+    for (let i = 1; i < points.length; i++) {
+      stepD += ` H${points[i].x.toFixed(1)} V${points[i].y.toFixed(1)}`;
+    }
+    stepD += ` H${endX}`;
+
+    // Filled area under "open" (top) portions
+    const fillD = stepD + ` V${yClosed} H${pad.left} Z`;
+
+    // Coloured line segments — horizontal run colour matches source state
+    let segments = '';
+    for (let i = 0; i < points.length; i++) {
+      const x1  = points[i].x;
+      const x2  = i < points.length - 1 ? points[i + 1].x : endX;
+      const col = points[i].state === 'on' ? openCol : closedCol;
+      segments += `<line x1="${x1.toFixed(1)}" y1="${points[i].y.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${points[i].y.toFixed(1)}" stroke="${col}" stroke-width="2.5" stroke-linecap="round"/>`;
+      if (i < points.length - 1) {
+        segments += `<line x1="${points[i+1].x.toFixed(1)}" y1="${points[i].y.toFixed(1)}" x2="${points[i+1].x.toFixed(1)}" y2="${points[i+1].y.toFixed(1)}" stroke="${col}" stroke-width="2" stroke-linecap="round" opacity="0.6"/>`;
+      }
+    }
+
+    const svgFont = this._haFont();
+
+    // Y-axis labels
+    const yLabels = `
+      <text x="${pad.left - 4}" y="${(yOpen   + 4).toFixed(1)}" fill="${openCol}"   font-size="7.5" text-anchor="end" font-family="${svgFont}" opacity="0.85">Open</text>
+      <text x="${pad.left - 4}" y="${(yClosed + 4).toFixed(1)}" fill="${closedCol}" font-size="7.5" text-anchor="end" font-family="${svgFont}" opacity="0.85">Closed</text>`;
+
+    // Subtle horizontal guide lines
+    const grid = `
+      <line x1="${pad.left}" y1="${yOpen}"   x2="${W-pad.right}" y2="${yOpen}"   stroke="rgba(255,255,255,0.05)" stroke-width="1"/>
+      <line x1="${pad.left}" y1="${yClosed}" x2="${W-pad.right}" y2="${yClosed}" stroke="rgba(255,255,255,0.05)" stroke-width="1"/>`;
+
+    // Time axis labels (start, mid, end)
+    const fmtT = ms => {
+      const d = new Date(ms);
+      return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+    };
+    const midT = (windowStart + windowEnd) / 2;
+    const midX = toX(midT);
+    const timeAxis = `
+      <text x="${pad.left}"        y="${H - 7}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="start"  font-family="${svgFont}">${fmtT(windowStart)}</text>
+      <text x="${midX.toFixed(1)}" y="${H - 7}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="middle" font-family="${svgFont}">${fmtT(midT)}</text>
+      <text x="${W - pad.right}"   y="${H - 7}" fill="rgba(255,255,255,0.25)" font-size="7.5" text-anchor="end"    font-family="${svgFont}">${fmtT(windowEnd)}</text>`;
+
+    return `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block;">
+      ${grid}
+      ${yLabels}
+      <path d="${fillD}" fill="${openCol}" opacity="0.12"/>
+      ${segments}
+      ${timeAxis}
+    </svg>`;
+  }
+
+  // ── Crosshair interaction for contact graph ───────────────────────────────
+
+  _attachContactCrosshair(svg, states, timestamps, windowStart, windowEnd, openCol, closedCol) {
+    const W = 380, H = 140;
+    const pad   = { top: 30, right: 10, bottom: 26, left: 44 };
+    const plotW = W - pad.left - pad.right;
+    const plotH = H - pad.top  - pad.bottom;
+    const span  = windowEnd - windowStart || 1;
+
+    let crosshairGroup = null;
+    let isDragging     = false;
+
+    const clientXtoSvgX = clientX => {
+      const rect   = svg.getBoundingClientRect();
+      const scaleX = W / rect.width;
+      return (clientX - rect.left) * scaleX;
+    };
+
+    const svgXtoTime = svgX => windowStart + ((svgX - pad.left) / plotW) * span;
+
+    const getStateAtTime = t => {
+      let state = states[0];
+      for (let i = 0; i < timestamps.length; i++) {
+        if (new Date(timestamps[i]).getTime() <= t) state = states[i];
+        else break;
+      }
+      return state;
+    };
+
+    const fmtTime = ms => {
+      const d = new Date(ms);
+      return `${d.getHours().toString().padStart(2,'0')}:${d.getMinutes().toString().padStart(2,'0')}`;
+    };
+
+    const showCrosshair = svgX => {
+      const cx    = Math.max(pad.left, Math.min(W - pad.right, svgX));
+      const t     = svgXtoTime(cx);
+      const state = getStateAtTime(t);
+      const isOpen = state === 'on';
+      const color  = isOpen ? openCol : closedCol;
+      const label  = isOpen ? 'Open' : 'Closed';
+
+      if (crosshairGroup) crosshairGroup.remove();
+      crosshairGroup = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+
+      // Dotted vertical line
+      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', cx.toFixed(1));
+      line.setAttribute('y1', pad.top.toString());
+      line.setAttribute('x2', cx.toFixed(1));
+      line.setAttribute('y2', (pad.top + plotH).toString());
+      line.setAttribute('stroke', 'rgba(255,255,255,0.75)');
+      line.setAttribute('stroke-width', '1.5');
+      line.setAttribute('stroke-dasharray', '4 3');
+
+      // Tooltip pill
+      const lblW = 60, lblH = 44;
+      const lblX = Math.max(pad.left + lblW / 2, Math.min(W - pad.right - lblW / 2, cx));
+      const lblY = pad.top + 1;
+
+      const bgRect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+      bgRect.setAttribute('x',            (lblX - lblW / 2).toFixed(1));
+      bgRect.setAttribute('y',            lblY.toFixed(1));
+      bgRect.setAttribute('width',        lblW.toString());
+      bgRect.setAttribute('height',       lblH.toString());
+      bgRect.setAttribute('rx',           '6');
+      bgRect.setAttribute('fill',         'rgba(0,0,0,0.80)');
+      bgRect.setAttribute('stroke',       color);
+      bgRect.setAttribute('stroke-width', '1.5');
+
+      const valText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      valText.setAttribute('x',           lblX.toFixed(1));
+      valText.setAttribute('y',           (lblY + 16).toFixed(1));
+      valText.setAttribute('fill',        color);
+      valText.setAttribute('font-size',   '11');
+      valText.setAttribute('font-weight', '700');
+      valText.setAttribute('text-anchor', 'middle');
+      valText.setAttribute('font-family', this._haFont());
+      valText.textContent = label;
+
+      const timeText = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      timeText.setAttribute('x',           lblX.toFixed(1));
+      timeText.setAttribute('y',           (lblY + 33).toFixed(1));
+      timeText.setAttribute('fill',        'rgba(255,255,255,0.65)');
+      timeText.setAttribute('font-size',   '12');
+      timeText.setAttribute('font-weight', '500');
+      timeText.setAttribute('text-anchor', 'middle');
+      timeText.setAttribute('font-family', this._haFont());
+      timeText.textContent = fmtTime(t);
+
+      crosshairGroup.appendChild(line);
+      crosshairGroup.appendChild(bgRect);
+      crosshairGroup.appendChild(valText);
+      crosshairGroup.appendChild(timeText);
+      svg.appendChild(crosshairGroup);
+    };
+
+    const clearCrosshair = () => {
+      if (crosshairGroup) { crosshairGroup.remove(); crosshairGroup = null; }
+    };
+
+    svg.style.cursor = 'crosshair';
+
+    // ── Touch ──
+    svg.addEventListener('touchstart', e => {
+      e.stopPropagation(); e.preventDefault();
+      const svgX = clientXtoSvgX(e.touches[0].clientX);
+      if (svgX < pad.left || svgX > W - pad.right) return;
+      isDragging = true;
+      showCrosshair(svgX);
+    }, { passive: false });
+
+    svg.addEventListener('touchmove', e => {
+      if (!isDragging) return;
+      e.stopPropagation(); e.preventDefault();
+      const svgX = clientXtoSvgX(e.touches[0].clientX);
+      if (svgX >= pad.left && svgX <= W - pad.right) showCrosshair(svgX);
+    }, { passive: false });
+
+    svg.addEventListener('touchend', e => {
+      e.stopPropagation();
+      isDragging = false;
+    }, { passive: false });
+
+    svg.addEventListener('touchcancel', () => { isDragging = false; });
+
+    // ── Mouse ──
+    svg.addEventListener('mousedown', e => {
+      e.stopPropagation();
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) return;
+      isDragging = true;
+      showCrosshair(svgX);
+    });
+
+    svg.addEventListener('mousemove', e => {
+      if (!isDragging) return;
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX >= pad.left && svgX <= W - pad.right) showCrosshair(svgX);
+    });
+
+    svg.addEventListener('mouseup', e => {
+      e.stopPropagation();
+      if (!isDragging) return;
+      isDragging = false;
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) clearCrosshair();
+    });
+
+    svg.addEventListener('mouseleave', () => { isDragging = false; });
+
+    svg.addEventListener('click', e => {
+      e.stopPropagation();
+      const svgX = clientXtoSvgX(e.clientX);
+      if (svgX < pad.left || svgX > W - pad.right) clearCrosshair();
+    });
   }
 }
 
